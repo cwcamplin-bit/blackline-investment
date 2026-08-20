@@ -169,6 +169,8 @@ def _parse_from_page_model(model: dict, source_url: str) -> ListingData:
     postcode_outcode = None
     if isinstance(address_info, dict):
         postcode_outcode = address_info.get("outcode")
+    if not postcode_outcode:
+        postcode_outcode = _extract_outcode_from_address(address)
  
     description = ""
     text_block = prop.get("text") or {}
@@ -229,6 +231,27 @@ _PRICE_QUALIFIER_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"shared\s+ownership", re.I), "shared_ownership"),
     (re.compile(r"fixed\s+price", re.I), "fixed_price"),
 ]
+ 
+ 
+_BARE_OUTCODE_PATTERN = re.compile(r"^[A-Z]{1,2}\d[A-Z\d]?$")
+ 
+ 
+def _extract_outcode_from_address(address: str | None) -> str | None:
+    """Rightmove display addresses end with the postcode outcode — either
+    bare ("...Coventry, CV6") or as the first token of a full postcode
+    ("...Coventry, CV6 4FD, CV6"), for privacy (the full postcode is rarely
+    shown). This is load-bearing: without an outcode, both live comparable
+    lookups (comparables.py) have nothing to search on and silently no-op —
+    that turned out to be the actual reason confidence looked capped
+    regardless of which property was analysed, since the jsonld/meta
+    fallback path (used by most real listings) never set this field."""
+    if not address:
+        return None
+    for part in reversed([p.strip() for p in address.split(",")]):
+        tokens = part.split()
+        if tokens and _BARE_OUTCODE_PATTERN.match(tokens[0].upper()):
+            return tokens[0].upper()
+    return None
  
  
 def _detect_price_qualifier(html: str) -> str | None:
@@ -320,6 +343,7 @@ def _parse_from_jsonld_and_meta(html: str, source_url: str) -> ListingData:
         beds=beds,
         property_type=property_type,
         description=description_text,
+        postcode_outcode=_extract_outcode_from_address(address),
         extraction_method="jsonld",
         fields_missing=missing,
     )
