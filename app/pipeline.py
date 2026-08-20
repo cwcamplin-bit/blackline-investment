@@ -56,7 +56,7 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
     # fallback (see land_registry.py); previously this was sequential
     # awaits, i.e. worst case roughly the SUM of all timeouts rather than
     # the MAX of them.
-    rent, comparables, area_trend, crime_stats = await asyncio.gather(
+    rent, comparables, area_trend, (crime_stats, crime_trend) = await asyncio.gather(
         comps_mod.fetch_rent_estimate(
             listing.price, listing.property_type, listing.beds, listing.postcode_outcode
         ),
@@ -64,7 +64,13 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
             listing.address, listing.postcode_outcode, listing.beds
         ),
         hpi_mod.fetch_area_trend(listing.postcode_outcode),
-        crime_mod.fetch_crime_stats(geocode),
+        # fetch_crime_context() does the current-month snapshot AND the
+        # year-on-year trend lookup (crime.py), sequentially inside this
+        # one coroutine — the trend needs the current month before it
+        # knows which baseline month to request. It still joins this
+        # gather() as a single unit, so it doesn't add a second
+        # sequential wait to the pipeline as a whole.
+        crime_mod.fetch_crime_context(geocode),
     )
 
     financials = fin_mod.analyse_financials(
@@ -81,7 +87,9 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
 
     scores = scoring_mod.score_property(listing, financials, comparables, rent, area_trend)
     clauses = narrative_mod.build_clauses(listing, financials, comparables, rent, area_trend, crime_stats)
-    strengths, risks = narrative_mod.build_strengths_and_risks(listing, financials, comparables, rent, scores, area_trend)
+    strengths, risks = narrative_mod.build_strengths_and_risks(
+        listing, financials, comparables, rent, scores, area_trend, crime_trend
+    )
     summary = await narrative_mod.build_summary(listing, financials, comparables, scores)
     offer_low, offer_high = narrative_mod.suggested_offer_range(listing.price, scores.verdict)
 
@@ -153,5 +161,10 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
             ),
             "crimeRadiusNote": crime_stats.radius_note if crime_stats else None,
             "crimeSource": "data.police.uk (official)" if crime_stats else "unavailable",
+            "crimeTrendAvailable": crime_trend is not None,
+            "crimeTrendChangePct": crime_trend.change_pct if crime_trend else None,
+            "crimeTrendBaselineMonth": crime_trend.baseline_month if crime_trend else None,
+            "crimeTrendBaselineCount": crime_trend.baseline_count if crime_trend else None,
+            "crimeTrendNote": crime_trend.note if crime_trend else None,
         },
     )
