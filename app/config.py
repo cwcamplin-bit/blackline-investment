@@ -33,12 +33,19 @@ class Settings(BaseSettings):
 
     # HM Land Registry's public SPARQL endpoint has no documented SLA.
     # Confirmed via live diagnostics (GET /api/debug/land-registry) that the
-    # outcode-prefix query genuinely times out at 6s against real outcodes
-    # (CV6, M20) — raised to give it more room, kept independent of
-    # extractor_timeout_seconds so a slow response here still can't drag out
-    # the whole analysis; comparables.py falls back to the Rightmove scrape
-    # if this times out or returns too little either way.
-    land_registry_timeout_seconds: float = 12.0
+    # outcode-prefix comparables query consistently times out against real
+    # outcodes (CV6, M20) — tried raising this to 12s and restructuring the
+    # query, still timed out, so it's very likely a structural limit of
+    # this endpoint for broad searches (see land_registry.py), not
+    # something a longer wait fixes. Deliberately shrunk back down: since
+    # this attempt essentially never succeeds, every second here is a pure
+    # latency tax on every single analysis before the Rightmove-scrape
+    # fallback even starts — 12s made a real, user-visible difference to
+    # response time for zero benefit. Kept non-zero (rather than disabled
+    # outright) in case some quieter outcode ever IS fast enough to
+    # succeed within this window — but this is now optimised for "fail
+    # fast, use the fallback" rather than "wait and hope."
+    land_registry_timeout_seconds: float = 3.0
 
     # UK House Price Index — same SPARQL endpoint as Land Registry sold
     # prices, but a much smaller, single-region query, so a short timeout
