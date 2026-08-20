@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.config import settings
+from app.engine import house_price_index as hpi_mod
 from app.engine import land_registry as lr_mod
 from app.engine.comparables import fetch_comparable_sales, fetch_rent_estimate
 from app.extractors.rightmove import ExtractionError, InvalidListingUrlError, ListingUnavailableError
@@ -147,6 +148,38 @@ async def debug_land_registry(request: Request) -> JSONResponse:
     })
 
 
+async def debug_house_price_index(request: Request) -> JSONResponse:
+    """Diagnostic endpoint: exercises the live postcodes.io -> UK HPI chain
+    directly for a given outcode — same pattern as the other /api/debug/*
+    routes. Surfaces which district name(s) were tried and the raw SPARQL
+    outcome, since a silent None here could mean postcodes.io returned
+    nothing, no label match was found, or the query itself failed."""
+    outcode = request.query_params.get("outcode")
+    if not outcode:
+        return JSONResponse({"error": "missing_outcode", "detail": "Pass ?outcode=CV6 (a Rightmove postcode outcode)."}, status_code=400)
+
+    trend, diagnostics = await hpi_mod.fetch_area_trend_with_diagnostics(outcode)
+
+    return JSONResponse({
+        "outcode": outcode,
+        "found": trend is not None,
+        "trend": {
+            "regionLabel": trend.region_label,
+            "latestMonth": trend.latest_month,
+            "latestIndex": trend.latest_index,
+            "latestAveragePrice": trend.latest_average_price,
+            "oneYearChangePct": trend.one_year_change_pct,
+            "fiveYearChangePct": trend.five_year_change_pct,
+        } if trend else None,
+        "diagnostics": {
+            "districtsTried": diagnostics.districts_tried,
+            "httpStatus": diagnostics.http_status,
+            "error": diagnostics.error,
+            "rawPointCount": diagnostics.raw_point_count,
+        },
+    })
+
+
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -156,6 +189,7 @@ routes = [
     Route("/api/analyze", analyze_get, methods=["GET"]),
     Route("/api/debug/comparables", debug_comparables, methods=["GET"]),
     Route("/api/debug/land-registry", debug_land_registry, methods=["GET"]),
+    Route("/api/debug/house-price-index", debug_house_price_index, methods=["GET"]),
     Route("/api/health", health, methods=["GET"]),
 ]
 
