@@ -17,6 +17,7 @@ import httpx
 
 from app.config import settings
 from app.engine.comparables import ComparablesResult, RentEstimate
+from app.engine.crime import CrimeStats
 from app.engine.financial import FinancialAnalysis
 from app.engine.house_price_index import AreaTrend
 from app.engine.scoring import BENCHMARK_NET_YIELD_PCT, ScoreBreakdown
@@ -84,7 +85,19 @@ def _value_add_clause(listing: ListingData) -> str:
     return base
 
 
-def _security_clause(listing: ListingData, comparables: ComparablesResult, rent: RentEstimate) -> str:
+def _crime_fragment(crime: CrimeStats | None) -> str:
+    # Deliberately descriptive, not evaluative — see crime.py's docstring
+    # for why a raw count within a fixed radius isn't turned into a
+    # "safe"/"risky" judgement: there's no fair per-area benchmark wired
+    # in to compare it against.
+    if not crime:
+        return ""
+    when = f" in {crime.month}" if crime.month else ""
+    top = f", most commonly {crime.top_categories[0][0]}" if crime.top_categories else ""
+    return f"; {crime.total_count} recorded crimes{when} {crime.radius_note}{top} (police.uk)"
+
+
+def _security_clause(listing: ListingData, comparables: ComparablesResult, rent: RentEstimate, crime: CrimeStats | None = None) -> str:
     parts = []
     if comparables.sales:
         parts.append(f"{len(comparables.sales)} comparable sale(s) as evidence")
@@ -96,15 +109,15 @@ def _security_clause(listing: ListingData, comparables: ComparablesResult, rent:
         if rent.method == "live_comparables"
         else "rent estimate is modelled, not yet verified against live listings"
     )
-    return ", ".join(parts)
+    return ", ".join(parts) + _crime_fragment(crime)
 
 
-def build_clauses(listing, financials, comparables, rent, area_trend: AreaTrend | None = None) -> dict:
+def build_clauses(listing, financials, comparables, rent, area_trend: AreaTrend | None = None, crime: CrimeStats | None = None) -> dict:
     return {
         "cashflow": _cashflow_clause(financials),
         "growth": _growth_clause(comparables, financials.purchase, listing, area_trend),
         "valueAdd": _value_add_clause(listing),
-        "security": _security_clause(listing, comparables, rent),
+        "security": _security_clause(listing, comparables, rent, crime),
     }
 
 
