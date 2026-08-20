@@ -103,7 +103,12 @@ def _confidence(security: int, listing: ListingData, comparables: ComparablesRes
     evidence_score = security
     extraction_quality = 100 if listing.extraction_method == "page_model" else 65
     extraction_quality -= min(len(listing.fields_missing) * 6, 30)
-    comps_quality = 100 if comparables.sales else 55
+    if comparables.method == "land_registry":
+        comps_quality = 100   # official government transaction records
+    elif comparables.sales:
+        comps_quality = 85    # scraped, real, but a less authoritative source
+    else:
+        comps_quality = 55
     rent_quality = 100 if rent.method == "live_comparables" else 60
     composite = evidence_score * 0.4 + extraction_quality * 0.25 + comps_quality * 0.2 + rent_quality * 0.15
     return _clamp(composite)
