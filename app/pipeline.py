@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 
 from app.engine import comparables as comps_mod
+from app.engine import crime as crime_mod
 from app.engine import financial as fin_mod
+from app.engine import geocoding as geo_mod
 from app.engine import house_price_index as hpi_mod
 from app.engine import narrative as narrative_mod
 from app.engine import scoring as scoring_mod
@@ -38,14 +40,23 @@ async def run_analysis_from_listing(listing: rm.ListingData, request: AnalyzeReq
 
 
 async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> AnalysisResult:
-    # These three external lookups are independent of each other (none
+    # crime.py needs a lat/lng (not just an outcode string), resolved via
+    # postcodes.io — done once, up front, so it can join the same
+    # concurrent batch below rather than adding its own sequential wait
+    # after everything else finishes. house_price_index.py still resolves
+    # its own district name internally rather than sharing this value —
+    # a small duplicate postcodes.io call, kept deliberately separate to
+    # avoid touching the already-confirmed-working HPI integration.
+    geocode = await geo_mod.resolve_outcode(listing.postcode_outcode)
+
+    # These four external lookups are independent of each other (none
     # needs another's result), so they run concurrently rather than one
     # after another — meaningful latency saving now that comparables can
     # involve a slow Land Registry attempt before its Rightmove-scrape
-    # fallback (see land_registry.py); previously this was three
-    # sequential awaits, i.e. worst case roughly the SUM of all three
-    # timeouts rather than the MAX of them.
-    rent, comparables, area_trend = await asyncio.gather(
+    # fallback (see land_registry.py); previously this was sequential
+    # awaits, i.e. worst case roughly the SUM of all timeouts rather than
+    # the MAX of them.
+    rent, comparables, area_trend, crime_stats = await asyncio.gather(
         comps_mod.fetch_rent_estimate(
             listing.price, listing.property_type, listing.beds, listing.postcode_outcode
         ),
@@ -53,6 +64,7 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
             listing.address, listing.postcode_outcode, listing.beds
         ),
         hpi_mod.fetch_area_trend(listing.postcode_outcode),
+        crime_mod.fetch_crime_stats(geocode),
     )
 
     financials = fin_mod.analyse_financials(
@@ -68,7 +80,7 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
     )
 
     scores = scoring_mod.score_property(listing, financials, comparables, rent, area_trend)
-    clauses = narrative_mod.build_clauses(listing, financials, comparables, rent, area_trend)
+    clauses = narrative_mod.build_clauses(listing, financials, comparables, rent, area_trend, crime_stats)
     strengths, risks = narrative_mod.build_strengths_and_risks(listing, financials, comparables, rent, scores, area_trend)
     summary = await narrative_mod.build_summary(listing, financials, comparables, scores)
     offer_low, offer_high = narrative_mod.suggested_offer_range(listing.price, scores.verdict)
@@ -133,5 +145,13 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
             "areaTrendFiveYearChangePct": area_trend.five_year_change_pct if area_trend else None,
             "areaTrendAsOf": area_trend.latest_month if area_trend else None,
             "areaTrendSource": "UK House Price Index (HM Land Registry / ONS)" if area_trend else "unavailable",
+            "crimeDataAvailable": crime_stats is not None,
+            "crimeTotalCount": crime_stats.total_count if crime_stats else None,
+            "crimeMonth": crime_stats.month if crime_stats else None,
+            "crimeTopCategories": (
+                [{"category": c, "count": n} for c, n in crime_stats.top_categories] if crime_stats else None
+            ),
+            "crimeRadiusNote": crime_stats.radius_note if crime_stats else None,
+            "crimeSource": "data.police.uk (official)" if crime_stats else "unavailable",
         },
     )
