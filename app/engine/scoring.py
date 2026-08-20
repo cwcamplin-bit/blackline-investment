@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from app.engine.comparables import ComparablesResult, RentEstimate
 from app.engine.financial import FinancialAnalysis
+from app.engine.house_price_index import AreaTrend
 from app.extractors.rightmove import ListingData
 from app.schemas import VERDICT_LABELS, Verdict
 
@@ -61,7 +62,7 @@ def _cashflow_score(financials: FinancialAnalysis) -> int:
     return _clamp(score)
 
 
-def _growth_score(comparables: ComparablesResult, price: int, listing: ListingData) -> int:
+def _growth_score(comparables: ComparablesResult, price: int, listing: ListingData, area_trend: AreaTrend | None) -> int:
     if comparables.sales:
         avg_comp = sum(p for _, p in comparables.sales) / len(comparables.sales)
         discount_pct = ((avg_comp - price) / avg_comp) * 100 if avg_comp else 0
@@ -71,6 +72,12 @@ def _growth_score(comparables: ComparablesResult, price: int, listing: ListingDa
                      # (lack of evidence already lowers `confidence` separately)
     if listing.price_reduced:
         score -= 8
+    # Area-level momentum is a secondary signal alongside the (property-
+    # specific) comparable-price discount above — modest weight, capped,
+    # and only applied when real UK HPI data was found (never fabricated,
+    # same rule as everywhere else: no data in, no adjustment out).
+    if area_trend and area_trend.one_year_change_pct is not None:
+        score += _clamp(area_trend.one_year_change_pct * 1.5, -8, 8)
     return _clamp(score)
 
 
@@ -131,9 +138,10 @@ def score_property(
     financials: FinancialAnalysis,
     comparables: ComparablesResult,
     rent: RentEstimate,
+    area_trend: AreaTrend | None = None,
 ) -> ScoreBreakdown:
     cashflow = _cashflow_score(financials)
-    growth = _growth_score(comparables, financials.purchase, listing)
+    growth = _growth_score(comparables, financials.purchase, listing, area_trend)
     value_add = _value_add_score(listing)
     security = _security_score(listing, comparables, rent)
     confidence = _confidence(security, listing, comparables, rent)
