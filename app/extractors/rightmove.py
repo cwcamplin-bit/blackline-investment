@@ -314,6 +314,87 @@ def _detect_epc_rating(html: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
+_DESCRIPTION_HEADING_PATTERN = re.compile(r"^(full\s+|property\s+)?description$", re.I)
+_KEY_FEATURES_HEADING_PATTERN = re.compile(r"^key\s+features$", re.I)
+_SECTION_STOP_TAGS = ("h1", "h2", "h3", "h4")
+_MAX_FULL_DESCRIPTION_CHARS = 4000
+
+
+def _find_section_heading(soup: BeautifulSoup, pattern: re.Pattern) -> "Tag | None":
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "div", "span"]):
+        text = tag.get_text(strip=True)
+        if text and pattern.match(text):
+            return tag
+    return None
+
+
+def _extract_full_description(soup: BeautifulSoup) -> str:
+    """Best-effort scrape of the page's own visible "Description" section.
+
+    Added after a real, live-tested false negative: the SEO meta-
+    description this fallback path otherwise relies on is a tiny, fixed-
+    format snippet ("N bedroom TYPE for sale in ADDRESS for £PRICE...")
+    that structurally never contains condition/renovation language — even
+    when the listing's own description explicitly says e.g. "in need of
+    renovation and modernisation, ... ample scope for substantial
+    renovation" (confirmed on a real listing, #87541464, where the
+    renovation-estimate module had nothing to work with as a result,
+    understating a property a user could see obviously needed
+    significant work).
+
+    Matches on the section's own visible HEADING TEXT ("Description"),
+    not a CSS class or id — those are far more likely to change without
+    notice than the user-facing label itself, the same "prefer the stable
+    public contract" reasoning behind favouring the SEO description
+    template over window.PAGE_MODEL elsewhere in this file.
+
+    Best-effort and defensive: this could not be verified against a live
+    Rightmove page's raw HTML from this development environment (network
+    egress here can reach Rightmove only through the deployed server
+    itself, not this scraper directly) — if the heading isn't found (page
+    template change, or the section turns out to be client-rendered only)
+    this simply returns "" and callers fall back to the existing, already-
+    working meta-description-only behaviour. Never raises. Capped at
+    `_MAX_FULL_DESCRIPTION_CHARS` and stops at the next heading tag, so a
+    template surprise can degrade to "captured too little" or "captured
+    some irrelevant trailing text", never an unbounded page-wide scrape."""
+    heading = _find_section_heading(soup, _DESCRIPTION_HEADING_PATTERN)
+    if heading is None:
+        return ""
+    chunks: list[str] = []
+    total_len = 0
+    for tag in heading.find_all_next():
+        if tag.name in _SECTION_STOP_TAGS:
+            break
+        if tag.name in ("p", "div", "li", "span"):
+            # Skip container tags that themselves hold one of these —
+            # only collect from the innermost ("leaf") text-bearing tags,
+            # so nested <div><p>...</p></div> markup isn't counted twice.
+            if tag.find(["p", "div", "li"]):
+                continue
+            text = tag.get_text(" ", strip=True)
+            if not text:
+                continue
+            chunks.append(text)
+            total_len += len(text)
+            if total_len >= _MAX_FULL_DESCRIPTION_CHARS:
+                break
+    return " ".join(chunks)[:_MAX_FULL_DESCRIPTION_CHARS]
+
+
+def _extract_key_features(soup: BeautifulSoup) -> list[str]:
+    """Same technique and same caveats as _extract_full_description(),
+    for the "Key features" bullet list Rightmove renders on most listing
+    pages. Best-effort: returns [] (not an error) if not found."""
+    heading = _find_section_heading(soup, _KEY_FEATURES_HEADING_PATTERN)
+    if heading is None:
+        return []
+    ul = heading.find_next("ul")
+    if ul is None:
+        return []
+    return [li.get_text(" ", strip=True) for li in ul.find_all("li") if li.get_text(strip=True)]
+
+
 def _parse_from_jsonld_and_meta(html: str, source_url: str) -> ListingData:
     """Fallback: schema.org JSON-LD, then Rightmove's templated SEO
     description text, then OpenGraph meta tags. Much less rich than
@@ -377,6 +458,20 @@ def _parse_from_jsonld_and_meta(html: str, source_url: str) -> ListingData:
     if isinstance(price, str):
         price = int(re.sub(r"[^\d]", "", price) or 0)
 
+    # The meta-tag snippet above is a fixed SEO template that never
+    # contains condition/renovation language (see _extract_full_
+    # description's docstring for why this matters) — append the page's
+    # own "Description" section text when it can be found, so the
+    # scoring/narrative/renovation keyword scans have real prose to work
+    # with, not just "N bed TYPE for sale in ADDRESS for £PRICE".
+    full_description = _extract_full_description(soup)
+    if full_description:
+        description_text = f"{description_text} {full_description}".strip()
+
+    key_features = _extract_key_features(soup)
+    if key_features:
+        missing = [f for f in missing if f != "key_features"]
+
     if beds is None:
         missing.append("beds")
     if not address:
@@ -391,6 +486,7 @@ def _parse_from_jsonld_and_meta(html: str, source_url: str) -> ListingData:
         beds=beds,
         property_type=property_type,
         description=description_text,
+        key_features=key_features,
         postcode_outcode=_extract_outcode_from_address(address),
         extraction_method="jsonld",
         fields_missing=missing,
