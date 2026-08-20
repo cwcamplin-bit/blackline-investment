@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # if this times out or returns too little either way.
     land_registry_timeout_seconds: float = 12.0
 
+    # UK House Price Index — same SPARQL endpoint as Land Registry sold
+    # prices, but a much smaller, single-region query, so a short timeout
+    # is appropriate (see house_price_index.py for why this should be
+    # fast where the sold-comparables query wasn't).
+    house_price_index_timeout_seconds: float = 8.0
+    # postcodes.io — free, unauthenticated, no documented rate limit issue
+    # in practice; short timeout since it's a simple lookup, not a search.
+    postcodes_io_timeout_seconds: float = 5.0
+
     # --- CORS: the Blackline front end origin(s) allowed to call this API ---
     allowed_origins: list[str] = ["*"]
 
