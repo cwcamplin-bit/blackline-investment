@@ -24,7 +24,9 @@ from app.engine import crime as crime_mod
 from app.engine import geocoding as geo_mod
 from app.engine import house_price_index as hpi_mod
 from app.engine import land_registry as lr_mod
+from app.engine import renovation as reno_mod
 from app.engine.comparables import fetch_comparable_sales, fetch_rent_estimate
+from app.extractors import rightmove as rm
 from app.extractors.rightmove import ExtractionError, InvalidListingUrlError, ListingUnavailableError
 from app.pipeline import run_analysis
 from app.schemas import AnalyzeRequest
@@ -230,6 +232,47 @@ async def debug_crime(request: Request) -> JSONResponse:
     })
 
 
+async def debug_extraction(request: Request) -> JSONResponse:
+    """Diagnostic endpoint: exercises the live Rightmove extractor for a
+    real listing URL and shows exactly what it found, including the two
+    fields most likely to be thin on the common jsonld/meta fallback path
+    — `description` and `key_features` — plus what the renovation-estimate
+    module does with them. Added specifically to let a real listing be
+    checked after deploying the "Description"/"Key features" section
+    scrape (_extract_full_description/_extract_key_features in
+    rightmove.py), which could not be verified against live Rightmove
+    HTML from the development environment this was built in."""
+    url = request.query_params.get("url")
+    if not url:
+        return JSONResponse({"error": "missing_url", "detail": "Pass ?url=<a full rightmove.co.uk listing URL>."}, status_code=400)
+
+    try:
+        listing = await rm.fetch_listing(url)
+    except InvalidListingUrlError as exc:
+        return JSONResponse({"error": "invalid_url", "detail": str(exc)}, status_code=400)
+    except ListingUnavailableError as exc:
+        return JSONResponse({"error": "listing_unavailable", "detail": str(exc)}, status_code=404)
+    except ExtractionError as exc:
+        return JSONResponse({"error": "extraction_failed", "detail": str(exc)}, status_code=502)
+
+    reno = reno_mod.estimate_renovation(listing)
+
+    return JSONResponse({
+        "extractionMethod": listing.extraction_method,
+        "fieldsMissing": listing.fields_missing,
+        "beds": listing.beds,
+        "epcRating": listing.epc_rating,
+        "descriptionLength": len(listing.description),
+        "descriptionPreview": listing.description[:600],
+        "keyFeatures": listing.key_features,
+        "renovationItems": [
+            {"label": i.label, "low": i.low, "high": i.high, "rationale": i.rationale}
+            for i in reno.items
+        ],
+        "renovationTotal": {"low": reno.total_low, "high": reno.total_high},
+    })
+
+
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -241,6 +284,7 @@ routes = [
     Route("/api/debug/land-registry", debug_land_registry, methods=["GET"]),
     Route("/api/debug/house-price-index", debug_house_price_index, methods=["GET"]),
     Route("/api/debug/crime", debug_crime, methods=["GET"]),
+    Route("/api/debug/extraction", debug_extraction, methods=["GET"]),
     Route("/api/health", health, methods=["GET"]),
 ]
 
