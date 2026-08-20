@@ -18,6 +18,7 @@ import httpx
 from app.config import settings
 from app.engine.comparables import ComparablesResult, RentEstimate
 from app.engine.financial import FinancialAnalysis
+from app.engine.house_price_index import AreaTrend
 from app.engine.scoring import BENCHMARK_NET_YIELD_PCT, ScoreBreakdown
 from app.extractors.rightmove import ListingData
 from app.schemas import Verdict
@@ -35,7 +36,15 @@ def _cashflow_clause(financials: FinancialAnalysis) -> str:
     return f"{yld:.1f}% net yield, {comparison}{cf_note}"
 
 
-def _growth_clause(comparables: ComparablesResult, price: int, listing: ListingData) -> str:
+def _area_trend_fragment(area_trend: AreaTrend | None) -> str:
+    if not area_trend or area_trend.one_year_change_pct is None:
+        return ""
+    pct = area_trend.one_year_change_pct
+    direction = "risen" if pct > 0 else "fallen" if pct < 0 else "held flat"
+    return f"; {area_trend.region_label} area prices have {direction} {abs(pct):.1f}% over the past year (UK HPI)"
+
+
+def _growth_clause(comparables: ComparablesResult, price: int, listing: ListingData, area_trend: AreaTrend | None = None) -> str:
     source_suffix = " (HM Land Registry)" if comparables.method == "land_registry" else ""
     if comparables.sales:
         avg_comp = sum(p for _, p in comparables.sales) / len(comparables.sales)
@@ -51,6 +60,7 @@ def _growth_clause(comparables: ComparablesResult, price: int, listing: ListingD
         clause = "no verified comparable sales evidence yet for this area"
     if listing.price_reduced:
         clause += "; the asking price has already been reduced once"
+    clause += _area_trend_fragment(area_trend)
     return clause
 
 
@@ -89,10 +99,10 @@ def _security_clause(listing: ListingData, comparables: ComparablesResult, rent:
     return ", ".join(parts)
 
 
-def build_clauses(listing, financials, comparables, rent) -> dict:
+def build_clauses(listing, financials, comparables, rent, area_trend: AreaTrend | None = None) -> dict:
     return {
         "cashflow": _cashflow_clause(financials),
-        "growth": _growth_clause(comparables, financials.purchase, listing),
+        "growth": _growth_clause(comparables, financials.purchase, listing, area_trend),
         "valueAdd": _value_add_clause(listing),
         "security": _security_clause(listing, comparables, rent),
     }
@@ -104,6 +114,7 @@ def build_strengths_and_risks(
     comparables: ComparablesResult,
     rent: RentEstimate,
     scores: ScoreBreakdown,
+    area_trend: AreaTrend | None = None,
 ) -> tuple[list[str], list[str]]:
     strengths: list[str] = []
     risks: list[str] = []
@@ -130,6 +141,13 @@ def build_strengths_and_risks(
             )
     else:
         risks.append("No comparable sales evidence available yet — valuation confidence is limited")
+
+    if area_trend and area_trend.one_year_change_pct is not None:
+        pct = area_trend.one_year_change_pct
+        if pct >= 3.0:
+            strengths.append(f"{area_trend.region_label} area prices up {pct:.1f}% over the past year (UK HPI)")
+        elif pct <= -2.0:
+            risks.append(f"{area_trend.region_label} area prices down {abs(pct):.1f}% over the past year (UK HPI)")
 
     if financials.cashflow_monthly > 0:
         strengths.append(f"Cashflow positive at ~£{financials.cashflow_monthly}/month under the modelled assumptions")
