@@ -17,7 +17,7 @@ import httpx
 
 from app.config import settings
 from app.engine.comparables import ComparablesResult, RentEstimate
-from app.engine.crime import CrimeStats
+from app.engine.crime import CrimeStats, CrimeTrend
 from app.engine.financial import FinancialAnalysis
 from app.engine.house_price_index import AreaTrend
 from app.engine.scoring import BENCHMARK_NET_YIELD_PCT, ScoreBreakdown
@@ -121,6 +121,14 @@ def build_clauses(listing, financials, comparables, rent, area_trend: AreaTrend 
     }
 
 
+# Same-area, year-on-year crime trend — NOT a cross-area comparison (see
+# crime.py's module docstring for why that distinction matters). Set wider
+# than the HPI thresholds (±3%/±2%) because month-level crime counts are
+# noisier than a price index; ±20% is a real, not marginal, swing.
+_CRIME_TREND_RISK_PCT = 20.0
+_CRIME_TREND_STRENGTH_PCT = -20.0
+
+
 def build_strengths_and_risks(
     listing: ListingData,
     financials: FinancialAnalysis,
@@ -128,6 +136,7 @@ def build_strengths_and_risks(
     rent: RentEstimate,
     scores: ScoreBreakdown,
     area_trend: AreaTrend | None = None,
+    crime_trend: CrimeTrend | None = None,
 ) -> tuple[list[str], list[str]]:
     strengths: list[str] = []
     risks: list[str] = []
@@ -161,6 +170,17 @@ def build_strengths_and_risks(
             strengths.append(f"{area_trend.region_label} area prices up {pct:.1f}% over the past year (UK HPI)")
         elif pct <= -2.0:
             risks.append(f"{area_trend.region_label} area prices down {abs(pct):.1f}% over the past year (UK HPI)")
+
+    if crime_trend is not None:
+        pct = crime_trend.change_pct
+        if pct <= _CRIME_TREND_STRENGTH_PCT:
+            strengths.append(
+                f"Recorded crime down {abs(pct):.0f}% year-on-year in the immediate area (police.uk)"
+            )
+        elif pct >= _CRIME_TREND_RISK_PCT:
+            risks.append(
+                f"Recorded crime up {pct:.0f}% year-on-year in the immediate area (police.uk)"
+            )
 
     if financials.cashflow_monthly > 0:
         strengths.append(f"Cashflow positive at ~£{financials.cashflow_monthly}/month under the modelled assumptions")
