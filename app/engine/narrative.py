@@ -1,7 +1,7 @@
 """Turns the scored, financial, and comparables data into the human-readable
 text analyse.html displays: the four per-dimension `clauses`, the
 `strengths` / `risks` lists, and the executive `summary`.
- 
+
 Every sentence here is built from a real computed value (yield, comparable
 count, EPC rating, ...) via templates — nothing is invented. This is the
 default and *only* path unless OPENAI_API_KEY is set, in which case the
@@ -12,17 +12,17 @@ summary is used untouched — narrative generation never blocks or breaks
 the pipeline.
 """
 from __future__ import annotations
- 
+
 import httpx
- 
+
 from app.config import settings
 from app.engine.comparables import ComparablesResult, RentEstimate
 from app.engine.financial import FinancialAnalysis
 from app.engine.scoring import BENCHMARK_NET_YIELD_PCT, ScoreBreakdown
 from app.extractors.rightmove import ListingData
 from app.schemas import Verdict
- 
- 
+
+
 def _cashflow_clause(financials: FinancialAnalysis) -> str:
     yld = financials.net_yield_pct
     if yld >= BENCHMARK_NET_YIELD_PCT + 1:
@@ -33,26 +33,27 @@ def _cashflow_clause(financials: FinancialAnalysis) -> str:
         comparison = f"below the {BENCHMARK_NET_YIELD_PCT:.1f}% benchmark for this strategy"
     cf_note = "" if financials.cashflow_monthly >= 0 else " — currently cashflow negative at this rent"
     return f"{yld:.1f}% net yield, {comparison}{cf_note}"
- 
- 
+
+
 def _growth_clause(comparables: ComparablesResult, price: int, listing: ListingData) -> str:
+    source_suffix = " (HM Land Registry)" if comparables.method == "land_registry" else ""
     if comparables.sales:
         avg_comp = sum(p for _, p in comparables.sales) / len(comparables.sales)
         discount_pct = ((avg_comp - price) / avg_comp) * 100 if avg_comp else 0
         n = len(comparables.sales)
         if discount_pct > 3:
-            clause = f"priced {discount_pct:.0f}% below {n} comparable sold price{'s' if n != 1 else ''} nearby"
+            clause = f"priced {discount_pct:.0f}% below {n} comparable sold price{'s' if n != 1 else ''} nearby{source_suffix}"
         elif discount_pct >= -3:
-            clause = f"broadly in line with {n} comparable sale{'s' if n != 1 else ''} nearby"
+            clause = f"broadly in line with {n} comparable sale{'s' if n != 1 else ''} nearby{source_suffix}"
         else:
-            clause = f"priced {abs(discount_pct):.0f}% above {n} comparable sale{'s' if n != 1 else ''} nearby"
+            clause = f"priced {abs(discount_pct):.0f}% above {n} comparable sale{'s' if n != 1 else ''} nearby{source_suffix}"
     else:
         clause = "no verified comparable sales evidence yet for this area"
     if listing.price_reduced:
         clause += "; the asking price has already been reduced once"
     return clause
- 
- 
+
+
 _EPC_LANGUAGE = {
     "A": "already at the top EPC band — limited upside from further improvement",
     "B": "already efficient (EPC B) — limited upside from further improvement",
@@ -62,8 +63,8 @@ _EPC_LANGUAGE = {
     "F": "EPC F — significant improvement required, factor this into any offer",
     "G": "EPC G — substantial works likely needed before letting or resale",
 }
- 
- 
+
+
 def _value_add_clause(listing: ListingData) -> str:
     epc = (listing.epc_rating or "").upper()
     base = _EPC_LANGUAGE.get(epc, "EPC rating not available — condition and improvement potential unverified")
@@ -71,8 +72,8 @@ def _value_add_clause(listing: ListingData) -> str:
     if any(kw in text for kw in ("extend", "extension", "loft", "side return", "stpp", "planning")):
         base += "; the listing signals extension/development potential, subject to planning"
     return base
- 
- 
+
+
 def _security_clause(listing: ListingData, comparables: ComparablesResult, rent: RentEstimate) -> str:
     parts = []
     if comparables.sales:
@@ -86,8 +87,8 @@ def _security_clause(listing: ListingData, comparables: ComparablesResult, rent:
         else "rent estimate is modelled, not yet verified against live listings"
     )
     return ", ".join(parts)
- 
- 
+
+
 def build_clauses(listing, financials, comparables, rent) -> dict:
     return {
         "cashflow": _cashflow_clause(financials),
@@ -95,8 +96,8 @@ def build_clauses(listing, financials, comparables, rent) -> dict:
         "valueAdd": _value_add_clause(listing),
         "security": _security_clause(listing, comparables, rent),
     }
- 
- 
+
+
 def build_strengths_and_risks(
     listing: ListingData,
     financials: FinancialAnalysis,
@@ -106,7 +107,7 @@ def build_strengths_and_risks(
 ) -> tuple[list[str], list[str]]:
     strengths: list[str] = []
     risks: list[str] = []
- 
+
     _QUALIFIER_LANGUAGE = {
         "guide_price": "This is an auction Guide Price, not a firm asking price — the eventual sale price is very likely to exceed it, which affects every figure below",
         "offers_in_excess_of": "Listed as 'offers in excess of' this price — treat it as a floor, not the likely purchase price",
@@ -118,46 +119,49 @@ def build_strengths_and_risks(
     qualifier_note = _QUALIFIER_LANGUAGE.get(listing.price_qualifier or "")
     if qualifier_note:
         risks.append(qualifier_note)
- 
+
     if comparables.sales:
         avg_comp = sum(p for _, p in comparables.sales) / len(comparables.sales)
         if avg_comp > financials.purchase:
             discount_pct = (avg_comp - financials.purchase) / avg_comp * 100
-            strengths.append(f"Priced ~{discount_pct:.0f}% below {len(comparables.sales)} comparable sold prices nearby")
+            source_suffix = " (HM Land Registry)" if comparables.method == "land_registry" else ""
+            strengths.append(
+                f"Priced ~{discount_pct:.0f}% below {len(comparables.sales)} comparable sold prices nearby{source_suffix}"
+            )
     else:
         risks.append("No comparable sales evidence available yet — valuation confidence is limited")
- 
+
     if financials.cashflow_monthly > 0:
         strengths.append(f"Cashflow positive at ~£{financials.cashflow_monthly}/month under the modelled assumptions")
     else:
         risks.append(f"Cashflow negative at ~£{financials.cashflow_monthly}/month under the modelled assumptions")
- 
+
     if financials.net_yield_pct >= BENCHMARK_NET_YIELD_PCT:
         strengths.append(f"Net yield of {financials.net_yield_pct:.1f}% exceeds the {BENCHMARK_NET_YIELD_PCT:.1f}% benchmark")
- 
+
     if rent.method != "live_comparables":
         risks.append("Rental figure is modelled rather than verified against live comparable listings")
- 
+
     epc = (listing.epc_rating or "").upper()
     if epc in ("E", "F", "G"):
         risks.append(f"EPC rated {epc} — likely to need improvement work, and possibly ahead of tightening MEES rules")
     if not listing.epc_rating:
         risks.append("No EPC on record — condition and running costs are unverified")
- 
+
     if listing.tenure and listing.tenure.upper() == "LEASEHOLD":
         risks.append("Leasehold — check remaining lease term and service charges before offering")
- 
+
     if listing.price_reduced:
         strengths.append("Asking price has already been reduced once, suggesting some room to negotiate further")
- 
+
     if not strengths:
         strengths.append("No standout strengths identified from the available listing data")
     if not risks:
         risks.append("No material risks identified from the available listing data")
- 
+
     return strengths[:4], risks[:4]
- 
- 
+
+
 def suggested_offer_range(price: int, verdict: Verdict) -> tuple[int, int]:
     if verdict in (Verdict.strongbuy, Verdict.buy):
         low_pct, high_pct = 0.95, 0.99
@@ -168,8 +172,8 @@ def suggested_offer_range(price: int, verdict: Verdict) -> tuple[int, int]:
     low = round(price * low_pct / 500) * 500
     high = round(price * high_pct / 500) * 500
     return low, high
- 
- 
+
+
 def _deterministic_summary(
     listing: ListingData,
     financials: FinancialAnalysis,
@@ -198,8 +202,8 @@ def _deterministic_summary(
         f"{qualifier_prefix}{comps_sentence}{yield_sentence}"
         f"Suggested offer range: £{low:,}–£{high:,}."
     )
- 
- 
+
+
 async def _try_openai_polish(deterministic_summary: str, address: str) -> str | None:
     if not settings.openai_api_key:
         return None
@@ -227,8 +231,8 @@ async def _try_openai_polish(deterministic_summary: str, address: str) -> str | 
             return data["choices"][0]["message"]["content"].strip()
     except Exception:
         return None
- 
- 
+
+
 async def build_summary(
     listing: ListingData,
     financials: FinancialAnalysis,
@@ -238,4 +242,3 @@ async def build_summary(
     deterministic = _deterministic_summary(listing, financials, comparables, scores)
     polished = await _try_openai_polish(deterministic, listing.address)
     return polished or deterministic
- 
