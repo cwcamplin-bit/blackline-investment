@@ -254,16 +254,64 @@ def _extract_outcode_from_address(address: str | None) -> str | None:
     return None
  
  
-def _detect_price_qualifier(html: str) -> str | None:
+def _detect_price_qualifier(html: str, price: int) -> str | None:
     """Auction listings in particular show a "Guide Price" rather than a
     firm asking price — the eventual sale price is very likely to exceed
     it. This matters financially (it's the input to every downstream
     calculation), so it's surfaced rather than silently treated as a normal
-    asking price. Checked regardless of which extraction path succeeded."""
-    for pattern, label in _PRICE_QUALIFIER_PATTERNS:
-        if pattern.search(html):
-            return label
-    return None
+    asking price.
+ 
+    Rightmove pages carry generic glossary/explainer blurbs for various
+    fields (e.g. "there are different types of tenure — freehold,
+    leasehold..."), and this function used to search the WHOLE page for
+    these phrases, which caused a real false positive: "shared ownership"
+    flagged on a property that has nothing to do with it, almost certainly
+    picked up from unrelated boilerplate elsewhere on the page rather than
+    anything about that specific listing. Now scoped to a small window
+    immediately before the price's own display — where Rightmove actually
+    renders a qualifier as a prefix, e.g. "Guide Price £29,000" — rather
+    than the whole document.
+ 
+    The price string can legitimately appear more than once (e.g. once in
+    an SEO meta description with no qualifier nearby, again in the page's
+    own visible heading right after "Guide Price") — so every occurrence is
+    checked, not just the first, and the first one with a qualifier in its
+    preceding window wins."""
+    price_str = f"{price:,}"
+    start = 0
+    while True:
+        idx = html.find(price_str, start)
+        if idx == -1:
+            return None
+        window = html[max(0, idx - 80) : idx]
+        for pattern, label in _PRICE_QUALIFIER_PATTERNS:
+            if pattern.search(window):
+                return label
+        start = idx + 1
+ 
+ 
+_TENURE_PATTERN = re.compile(r"\bTENURE\b\s{0,3}[:\-]?\s{0,3}(Leasehold|Freehold|Share of Freehold|Commonhold)\b")
+_EPC_TEXT_PATTERN = re.compile(r"(?:EPC|energy)\s+rating\s+(?:of\s+|is\s+|[:\-]\s*)?([A-G])\b", re.I)
+ 
+ 
+def _detect_tenure(html: str) -> str | None:
+    """Rightmove renders tenure as a tight "TENURE Leasehold"-style label/
+    value pair in a property-facts section — deliberately case-sensitive on
+    the "TENURE" label and a short gap, so this doesn't also match the
+    much longer, lower-case glossary sentence explaining what tenure means
+    ("...types of tenure - freehold, leasehold, and commonhold"), which sits
+    on the same page and would otherwise produce a false/arbitrary answer."""
+    m = _TENURE_PATTERN.search(html)
+    return m.group(1) if m else None
+ 
+ 
+def _detect_epc_rating(html: str) -> str | None:
+    """EPC rating is often stated in prose within the property's own
+    description ("...EPC rating of C...") rather than a structured field —
+    confirmed against a real listing during development, where the
+    structured PAGE_MODEL path this originally relied on wasn't present."""
+    m = _EPC_TEXT_PATTERN.search(html)
+    return m.group(1).upper() if m else None
  
  
 def _parse_from_jsonld_and_meta(html: str, source_url: str) -> ListingData:
@@ -366,7 +414,29 @@ def parse_listing_html(html: str, source_url: str) -> ListingData:
     if listing is None:
         listing = _parse_from_jsonld_and_meta(html, source_url)
  
-    listing.price_qualifier = _detect_price_qualifier(html)
+    listing.price_qualifier = _detect_price_qualifier(html, listing.price)
+ 
+    # The page_model path already fills tenure/EPC when Rightmove's richer
+    # data blob is present; the jsonld/meta fallback path (used by most real
+    # listings, per README) never attempted either. Both are commonly stated
+    # in the listing's own description prose or a structured facts strip
+    # even when PAGE_MODEL is absent, so detect them here regardless of
+    # which path produced `listing`, only overwriting genuinely missing
+    # values (never second-guessing a value the richer path already found).
+    if listing.tenure is None:
+        detected_tenure = _detect_tenure(html)
+        if detected_tenure:
+            listing.tenure = detected_tenure
+            if "tenure" in listing.fields_missing:
+                listing.fields_missing.remove("tenure")
+ 
+    if listing.epc_rating is None:
+        detected_epc = _detect_epc_rating(html)
+        if detected_epc:
+            listing.epc_rating = detected_epc
+            if "epc_rating" in listing.fields_missing:
+                listing.fields_missing.remove("epc_rating")
+ 
     return listing
  
  
