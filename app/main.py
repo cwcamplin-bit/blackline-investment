@@ -20,6 +20,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.config import settings
+from app.engine import crime as crime_mod
+from app.engine import geocoding as geo_mod
 from app.engine import house_price_index as hpi_mod
 from app.engine import land_registry as lr_mod
 from app.engine.comparables import fetch_comparable_sales, fetch_rent_estimate
@@ -180,6 +182,38 @@ async def debug_house_price_index(request: Request) -> JSONResponse:
     })
 
 
+async def debug_crime(request: Request) -> JSONResponse:
+    """Diagnostic endpoint: exercises the live postcodes.io -> police.uk
+    chain directly for a given outcode — same pattern as the other
+    /api/debug/* routes."""
+    outcode = request.query_params.get("outcode")
+    if not outcode:
+        return JSONResponse({"error": "missing_outcode", "detail": "Pass ?outcode=CV6 (a Rightmove postcode outcode)."}, status_code=400)
+
+    geocode = await geo_mod.resolve_outcode(outcode)
+    if geocode is None:
+        return JSONResponse({"outcode": outcode, "found": False, "diagnostics": {"error": "postcodes.io could not resolve this outcode to a lat/lng"}})
+
+    stats, diagnostics = await crime_mod.fetch_crime_stats_with_diagnostics(geocode)
+
+    return JSONResponse({
+        "outcode": outcode,
+        "resolvedLatLng": {"lat": geocode.latitude, "lng": geocode.longitude},
+        "found": stats is not None,
+        "stats": {
+            "totalCount": stats.total_count,
+            "month": stats.month,
+            "topCategories": [{"category": c, "count": n} for c, n in stats.top_categories],
+            "radiusNote": stats.radius_note,
+        } if stats else None,
+        "diagnostics": {
+            "httpStatus": diagnostics.http_status,
+            "error": diagnostics.error,
+            "rawRecordCount": diagnostics.raw_record_count,
+        },
+    })
+
+
 async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
@@ -190,6 +224,7 @@ routes = [
     Route("/api/debug/comparables", debug_comparables, methods=["GET"]),
     Route("/api/debug/land-registry", debug_land_registry, methods=["GET"]),
     Route("/api/debug/house-price-index", debug_house_price_index, methods=["GET"]),
+    Route("/api/debug/crime", debug_crime, methods=["GET"]),
     Route("/api/health", health, methods=["GET"]),
 ]
 
