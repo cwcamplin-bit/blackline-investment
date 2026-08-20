@@ -15,12 +15,15 @@ from app.engine import financial as fin_mod
 from app.engine import geocoding as geo_mod
 from app.engine import house_price_index as hpi_mod
 from app.engine import narrative as narrative_mod
+from app.engine import renovation as reno_mod
 from app.engine import scoring as scoring_mod
 from app.extractors import rightmove as rm
 from app.schemas import (
     AnalysisResult,
     Clauses,
     Financials,
+    RenovationEstimate,
+    RenovationItem,
     Scores,
     Strategy,
     AnalyzeRequest,
@@ -85,6 +88,11 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
         insurance_monthly=settings.default_insurance_monthly,
     )
 
+    # Pure computation from fields already on `listing` (EPC + description/
+    # key-features keyword scan) — no network call, so unlike the four
+    # lookups above it doesn't need to join the asyncio.gather batch.
+    reno_estimate = reno_mod.estimate_renovation(listing)
+
     scores = scoring_mod.score_property(listing, financials, comparables, rent, area_trend)
     clauses = narrative_mod.build_clauses(listing, financials, comparables, rent, area_trend, crime_stats)
     strengths, risks = narrative_mod.build_strengths_and_risks(
@@ -123,6 +131,16 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
         strengths=strengths,
         risks=risks,
         summary=summary,
+        renovation=RenovationEstimate(
+            items=[
+                RenovationItem(label=i.label, low=i.low, high=i.high, rationale=i.rationale)
+                for i in reno_estimate.items
+            ],
+            totalLow=reno_estimate.total_low,
+            totalHigh=reno_estimate.total_high,
+            asOf=reno_estimate.as_of,
+            note=reno_estimate.note,
+        ),
         assumptions={
             "ltvPercent": request.ltv_percent or settings.default_ltv_percent,
             "mortgageRatePercent": request.mortgage_rate_percent or settings.default_mortgage_rate_percent,
