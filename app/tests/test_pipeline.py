@@ -4,11 +4,14 @@ from unittest.mock import patch
 
 from starlette.testclient import TestClient
 
-from app.extractors.rightmove import ListingData
+from app.extractors.rightmove import ListingData, parse_listing_html
 from app.pipeline import run_analysis_from_listing
 from app.schemas import AnalyzeRequest
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "rightmove_sample.html")
+NO_PAGE_MODEL_FIXTURE_PATH = os.path.join(
+    os.path.dirname(__file__), "fixtures", "rightmove_sample_no_page_model.html"
+)
 
 
 def _sample_listing() -> ListingData:
@@ -61,6 +64,35 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(low_ltv.financials.mortgage, high_ltv.financials.mortgage)
 
 
+class RealWorldFallbackExtractionTests(unittest.IsolatedAsyncioTestCase):
+    """Regression coverage for a real listing (an auction property) that
+    Rightmove served without a window.PAGE_MODEL blob, which the original
+    extractor couldn't handle — see rightmove_sample_no_page_model.html for
+    the exact structure encountered. This is the extraction path that fixed
+    a live "could not find a price" failure during development."""
+
+    def setUp(self):
+        with open(NO_PAGE_MODEL_FIXTURE_PATH) as f:
+            self.html = f.read()
+
+    def test_extracts_price_address_and_beds_from_seo_description(self):
+        listing = parse_listing_html(self.html, "https://www.rightmove.co.uk/properties/90650022")
+        self.assertEqual(listing.price, 29_000)
+        self.assertEqual(listing.address, "32 Pembrook Road, Coventry, CV6 4FD, CV6")
+        self.assertEqual(listing.beds, 2)
+        self.assertEqual(listing.extraction_method, "jsonld")
+
+    def test_flags_auction_guide_price_as_a_qualifier(self):
+        listing = parse_listing_html(self.html, "https://www.rightmove.co.uk/properties/90650022")
+        self.assertEqual(listing.price_qualifier, "guide_price")
+
+    async def test_guide_price_produces_a_leading_risk_and_summary_caveat(self):
+        listing = parse_listing_html(self.html, "https://www.rightmove.co.uk/properties/90650022")
+        result = await run_analysis_from_listing(listing, AnalyzeRequest(url=listing.source_url))
+        self.assertTrue(any("Guide Price" in r for r in result.risks))
+        self.assertIn("not a firm asking price", result.summary)
+
+
 class HttpEndpointTests(unittest.TestCase):
     def setUp(self):
         with open(FIXTURE_PATH) as f:
@@ -89,7 +121,7 @@ class HttpEndpointTests(unittest.TestCase):
         expected_top_level_keys = {
             "address", "price", "beds", "type", "sourceUrl", "verdict", "verdictLabel",
             "confidence", "scores", "clauses", "financials", "strategy", "comparables",
-            "strengths", "risks", "summary", "assumptions", "data_quality",
+            "strengths", "risks", "summary", "renovation", "assumptions", "data_quality",
         }
         self.assertEqual(expected_top_level_keys, set(body.keys()))
         self.assertEqual(set(body["scores"].keys()), {"growth", "valueAdd", "security", "cashflow"})
@@ -98,6 +130,15 @@ class HttpEndpointTests(unittest.TestCase):
             {"purchase", "stampDuty", "deposit", "mortgage", "rent", "cashflow", "yieldPct", "roiPct"},
         )
         self.assertEqual(set(body["strategy"].keys()), {"btl", "brrr", "flip"})
+        self.assertEqual(
+            set(body["renovation"].keys()),
+            {"items", "totalLow", "totalHigh", "asOf", "note"},
+        )
+        self.assertGreaterEqual(len(body["renovation"]["items"]), 1)
+        self.assertEqual(
+            set(body["renovation"]["items"][0].keys()),
+            {"label", "low", "high", "rationale"},
+        )
 
     def test_analyze_rejects_non_rightmove_url(self):
         resp = self.client.post("/api/analyze", json={"url": "https://www.zoopla.co.uk/for-sale/details/1"})
