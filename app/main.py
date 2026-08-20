@@ -195,6 +195,7 @@ async def debug_crime(request: Request) -> JSONResponse:
         return JSONResponse({"outcode": outcode, "found": False, "diagnostics": {"error": "postcodes.io could not resolve this outcode to a lat/lng"}})
 
     stats, diagnostics = await crime_mod.fetch_crime_stats_with_diagnostics(geocode)
+    trend = await crime_mod.fetch_crime_trend(geocode, stats) if stats else None
 
     return JSONResponse({
         "outcode": outcode,
@@ -206,10 +207,25 @@ async def debug_crime(request: Request) -> JSONResponse:
             "topCategories": [{"category": c, "count": n} for c, n in stats.top_categories],
             "radiusNote": stats.radius_note,
         } if stats else None,
+        "trend": {
+            "changePct": trend.change_pct,
+            "currentMonth": trend.current_month,
+            "currentCount": trend.current_count,
+            "baselineMonth": trend.baseline_month,
+            "baselineCount": trend.baseline_count,
+            "note": trend.note,
+        } if trend else None,
         "diagnostics": {
             "httpStatus": diagnostics.http_status,
             "error": diagnostics.error,
             "rawRecordCount": diagnostics.raw_record_count,
+            "trendNote": (
+                "No trend: either <10 baseline crimes a year ago, the "
+                "baseline lookup failed, or there wasn't enough data to "
+                "compute one — see fetch_crime_trend()."
+                if stats and trend is None
+                else None
+            ),
         },
     })
 
