@@ -6,7 +6,12 @@ Two data needs, two different honesty rules:
     Rd sold for £241,000"). We only ever show real, sourced records here —
     if a live lookup fails, this returns an EMPTY list rather than invented
     addresses/prices. Fabricating comparables would make the report
-    actively misleading for an investment decision.
+    actively misleading for an investment decision. As of this revision,
+    sold comparables are tried in priority order: HM Land Registry's
+    official Price Paid Data first (see land_registry.py — authoritative,
+    government-published transaction records), falling back to the
+    previously-working Rightmove `/house-prices/<outcode>.html` scrape if
+    Land Registry returns fewer than 3 results or is unreachable.
  
   * Estimated RENT is presented as a model output, not a specific record —
     the UI already labels it "Estimated rent". So when a live comparable
@@ -33,6 +38,7 @@ import httpx
 from bs4 import BeautifulSoup
  
 from app.config import settings
+from app.engine import land_registry
  
 # Approximate gross rental yield by property type, used only as the
 # last-resort fallback when no live rental comparables can be found.
@@ -184,6 +190,14 @@ _ADDRESS_LINE_PATTERN = re.compile(
 )
  
  
+_LAND_REGISTRY_ATTRIBUTION = (
+    "Contains HM Land Registry data © Crown copyright and database right, "
+    "licensed under the Open Government Licence v3.0."
+)
+ 
+_MIN_LAND_REGISTRY_RESULTS = 3  # below this, prefer the Rightmove scrape's larger sample
+ 
+ 
 async def fetch_comparable_sales(
     address: str,
     outcode: str | None,
@@ -191,9 +205,31 @@ async def fetch_comparable_sales(
 ) -> ComparablesResult:
     """Best-effort: look up recently sold comparables near the listing.
     Returns an EMPTY result (never fabricated data) if nothing verifiable
-    can be found — see module docstring for why."""
+    can be found — see module docstring for why. Tries HM Land Registry's
+    official data first; falls back to the Rightmove scrape below."""
     if not outcode:
         return ComparablesResult(sales=[], method="unavailable", note="No postcode area available for comparables lookup.")
+ 
+    try:
+        lr_sales = await land_registry.fetch_outcode_comparables(outcode)
+    except Exception:
+        lr_sales = []
+ 
+    if len(lr_sales) >= _MIN_LAND_REGISTRY_RESULTS:
+        sales = [(s.address, s.price) for s in lr_sales]
+        dated = [s for s in lr_sales if s.date]
+        date_range = (
+            f" (sold between {min(s.date for s in dated)} and {max(s.date for s in dated)})"
+            if dated else ""
+        )
+        return ComparablesResult(
+            sales=sales,
+            method="land_registry",
+            note=(
+                f"{len(sales)} recently sold properties in {outcode}{date_range} — "
+                f"official HM Land Registry Price Paid Data, not scraped. {_LAND_REGISTRY_ATTRIBUTION}"
+            ),
+        )
  
     try:
         async with httpx.AsyncClient(
