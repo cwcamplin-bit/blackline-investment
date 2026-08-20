@@ -31,11 +31,14 @@ class Settings(BaseSettings):
     )
     extractor_max_retries: int = 2
 
-    # HM Land Registry's public SPARQL endpoint has no documented SLA — kept
-    # short and independent of extractor_timeout_seconds so a slow response
-    # here can't drag out the whole analysis; comparables.py falls back to
-    # the Rightmove scrape if this times out or returns too little.
-    land_registry_timeout_seconds: float = 6.0
+    # HM Land Registry's public SPARQL endpoint has no documented SLA.
+    # Confirmed via live diagnostics (GET /api/debug/land-registry) that the
+    # outcode-prefix query genuinely times out at 6s against real outcodes
+    # (CV6, M20) — raised to give it more room, kept independent of
+    # extractor_timeout_seconds so a slow response here still can't drag out
+    # the whole analysis; comparables.py falls back to the Rightmove scrape
+    # if this times out or returns too little either way.
+    land_registry_timeout_seconds: float = 12.0
 
     # --- CORS: the Blackline front end origin(s) allowed to call this API ---
     allowed_origins: list[str] = ["*"]
