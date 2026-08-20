@@ -131,12 +131,19 @@ async def debug_land_registry(request: Request) -> JSONResponse:
     if not outcode:
         return JSONResponse({"error": "missing_outcode", "detail": "Pass ?outcode=CV6 (a Rightmove postcode outcode)."}, status_code=400)
 
-    sales = await lr_mod.fetch_outcode_comparables(outcode)
+    sales, diagnostics = await lr_mod.fetch_outcode_comparables_with_diagnostics(outcode)
 
     return JSONResponse({
         "outcode": outcode,
         "resultCount": len(sales),
         "sales": [{"address": s.address, "price": s.price, "date": s.date} for s in sales],
+        "diagnostics": {
+            "queryUrl": diagnostics.query_url,
+            "httpStatus": diagnostics.http_status,
+            "error": diagnostics.error,
+            "rawBindingCount": diagnostics.raw_binding_count,
+            "rawBodySnippet": diagnostics.raw_body_snippet,
+        },
     })
 
 
