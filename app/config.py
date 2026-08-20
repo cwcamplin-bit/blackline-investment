@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # postcodes.io — free, unauthenticated, no documented rate limit issue
     # in practice; short timeout since it's a simple lookup, not a search.
     postcodes_io_timeout_seconds: float = 5.0
+    # data.police.uk — free, unauthenticated, purpose-built REST API for
+    # exactly this per-request geo query (unlike Land Registry's SPARQL
+    # endpoint), so a short timeout is appropriate; 15 req/s rate limit
+    # documented but not a concern at this app's request volume.
+    police_uk_timeout_seconds: float = 8.0
 
     # --- CORS: the Blackline front end origin(s) allowed to call this API ---
     allowed_origins: list[str] = ["*"]
