@@ -73,6 +73,21 @@ class Strategy(BaseModel):
     flip: int
 
 
+class RenovationItem(BaseModel):
+    label: str
+    low: int
+    high: int
+    rationale: str
+
+
+class RenovationEstimate(BaseModel):
+    items: list[RenovationItem]
+    totalLow: int
+    totalHigh: int
+    asOf: str
+    note: str
+
+
 class AnalysisResult(BaseModel):
     address: str
     price: int
@@ -93,6 +108,7 @@ class AnalysisResult(BaseModel):
     strengths: list[str]
     risks: list[str]
     summary: str
+    renovation: RenovationEstimate
 
     # Transparency fields not shown in the current UI but useful for
     # debugging / future UI surfaces — safe to ignore client-side.
