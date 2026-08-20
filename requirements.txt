@@ -1,0 +1,13 @@
+# Core web framework. The app is written directly against Starlette (the
+# ASGI framework FastAPI itself is built on) plus Pydantic for validation —
+# this keeps the dependency footprint small while staying fully compatible
+# with FastAPI idioms. If you'd rather run it under FastAPI directly, the
+# route handlers in app/main.py port over with only cosmetic changes.
+starlette==0.38.6
+uvicorn[standard]==0.30.6
+
+httpx==0.27.2
+beautifulsoup4==4.12.3
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
