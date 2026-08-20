@@ -168,16 +168,19 @@ async def fetch_rent_estimate(
     return _fallback_rent_estimate(price, property_type)
  
  
-# Sold-price pages render each result as an address ending in a UK
-# postcode, followed shortly after (within the same result card — a sold
-# date and property type typically sit in between) by a "£<price>" figure —
-# e.g. "6, Ansell Drive, Coventry CV6 6PQ ... £250,000". Parsed from the
-# page's flattened visible text (via get_text()) rather than assumed JSON
-# key names, since — unlike the listing page — no embedded data blob could
-# be confirmed for this page type. The bounded gap keeps a match from
-# spanning into the next result's address.
+# Sold-price pages are a results table: each row repeats the address (once
+# as a visible link, once again immediately after — an accessibility
+# artifact of the markup), then property type/tenure text and a "See what
+# it's worth now" link, THEN one or more sold date/price pairs, most recent
+# first — e.g. "6, Ansell Drive, Coventry CV6 6PQ [address repeated] Semi-
+# Detached Freehold ... 16 Apr 2026 £250,000 14 Nov 2003 £118,500". Parsed
+# from flattened visible text (get_text()) since no embedded data blob
+# could be confirmed for this page type — the wider gap accounts for that
+# intervening column text; the non-greedy address capture means a findall
+# match anchors on the FIRST address occurrence, and takes the FIRST (most
+# recent) price after it, not the older resale price further along the row.
 _ADDRESS_LINE_PATTERN = re.compile(
-    rf"(\d+,\s*[^£]{{3,80}}?{_UK_POSTCODE})[^£]{{0,80}}£\s?([\d,]+)", re.I
+    rf"(?<![£\d,])(\d{{1,4}},\s*[A-Za-z][^£]{{2,80}}?{_UK_POSTCODE})[^£]{{0,150}}£\s?([\d,]+)", re.I
 )
  
  
