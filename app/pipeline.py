@@ -107,5 +107,12 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
             "fieldsMissing": listing.fields_missing,
             "comparablesMethod": comparables.method,
             "comparablesNote": comparables.note,
+            "comparablesSource": (
+                "HM Land Registry Price Paid Data (official)"
+                if comparables.method == "land_registry"
+                else "Rightmove sold-prices page (scraped)"
+                if comparables.method == "live_scrape"
+                else "unavailable"
+            ),
         },
     )
