@@ -7,8 +7,11 @@ spinning up a web server.
 """
 from __future__ import annotations
 
+import asyncio
+
 from app.engine import comparables as comps_mod
 from app.engine import financial as fin_mod
+from app.engine import house_price_index as hpi_mod
 from app.engine import narrative as narrative_mod
 from app.engine import scoring as scoring_mod
 from app.extractors import rightmove as rm
@@ -35,11 +38,21 @@ async def run_analysis_from_listing(listing: rm.ListingData, request: AnalyzeReq
 
 
 async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> AnalysisResult:
-    rent = await comps_mod.fetch_rent_estimate(
-        listing.price, listing.property_type, listing.beds, listing.postcode_outcode
-    )
-    comparables = await comps_mod.fetch_comparable_sales(
-        listing.address, listing.postcode_outcode, listing.beds
+    # These three external lookups are independent of each other (none
+    # needs another's result), so they run concurrently rather than one
+    # after another — meaningful latency saving now that comparables can
+    # involve a slow Land Registry attempt before its Rightmove-scrape
+    # fallback (see land_registry.py); previously this was three
+    # sequential awaits, i.e. worst case roughly the SUM of all three
+    # timeouts rather than the MAX of them.
+    rent, comparables, area_trend = await asyncio.gather(
+        comps_mod.fetch_rent_estimate(
+            listing.price, listing.property_type, listing.beds, listing.postcode_outcode
+        ),
+        comps_mod.fetch_comparable_sales(
+            listing.address, listing.postcode_outcode, listing.beds
+        ),
+        hpi_mod.fetch_area_trend(listing.postcode_outcode),
     )
 
     financials = fin_mod.analyse_financials(
@@ -54,9 +67,9 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
         insurance_monthly=settings.default_insurance_monthly,
     )
 
-    scores = scoring_mod.score_property(listing, financials, comparables, rent)
-    clauses = narrative_mod.build_clauses(listing, financials, comparables, rent)
-    strengths, risks = narrative_mod.build_strengths_and_risks(listing, financials, comparables, rent, scores)
+    scores = scoring_mod.score_property(listing, financials, comparables, rent, area_trend)
+    clauses = narrative_mod.build_clauses(listing, financials, comparables, rent, area_trend)
+    strengths, risks = narrative_mod.build_strengths_and_risks(listing, financials, comparables, rent, scores, area_trend)
     summary = await narrative_mod.build_summary(listing, financials, comparables, scores)
     offer_low, offer_high = narrative_mod.suggested_offer_range(listing.price, scores.verdict)
 
@@ -114,5 +127,11 @@ async def _analyse_listing(listing: rm.ListingData, request: AnalyzeRequest) -> 
                 if comparables.method == "live_scrape"
                 else "unavailable"
             ),
+            "areaTrendAvailable": area_trend is not None,
+            "areaTrendRegion": area_trend.region_label if area_trend else None,
+            "areaTrendOneYearChangePct": area_trend.one_year_change_pct if area_trend else None,
+            "areaTrendFiveYearChangePct": area_trend.five_year_change_pct if area_trend else None,
+            "areaTrendAsOf": area_trend.latest_month if area_trend else None,
+            "areaTrendSource": "UK House Price Index (HM Land Registry / ONS)" if area_trend else "unavailable",
         },
     )
