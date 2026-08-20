@@ -1,35 +1,39 @@
 """Rent estimation and comparable sales.
-
+ 
 Two data needs, two different honesty rules:
-
+ 
   * Comparable SALES are presented to the customer as evidence ("12 Ashworth
     Rd sold for £241,000"). We only ever show real, sourced records here —
     if a live lookup fails, this returns an EMPTY list rather than invented
     addresses/prices. Fabricating comparables would make the report
     actively misleading for an investment decision.
-
+ 
   * Estimated RENT is presented as a model output, not a specific record —
     the UI already labels it "Estimated rent". So when a live comparable
     rental search can't be reached, falling back to a documented regional
     yield model is legitimate (the same thing Zoopla's Zed-Index or any
     AVM does), as long as it's flagged as modelled rather than verified.
-
-Both live paths scrape Rightmove (per the "best-effort scraping" approach
-agreed for v1) and are the most likely parts of this codebase to need
-maintenance, since they depend on Rightmove's search/typeahead internals
-rather than a stable public contract. See README for the recommended
-upgrade path (a licensed comparables/AVM API or the free HM Land Registry
-Price Paid Data for sold prices).
+ 
+Both live paths scrape rendered Rightmove HTML pages — not Rightmove's
+internal `/api/*` endpoints, which its robots.txt explicitly disallows
+(`Disallow: /api/*`). `/house-prices/<outcode>.html` and
+`/property-to-rent/find.html` are not in that disallow list, so this stays
+within what Rightmove has told crawlers is acceptable, at the cost of
+parsing rendered text rather than a clean JSON contract — the most likely
+part of this codebase to need maintenance if Rightmove changes its page
+layout. See README for the recommended upgrade path (a licensed
+comparables/AVM API, or HM Land Registry Price Paid Data for sold prices).
 """
 from __future__ import annotations
-
+ 
 import re
 from dataclasses import dataclass, field
-
+ 
 import httpx
-
+from bs4 import BeautifulSoup
+ 
 from app.config import settings
-
+ 
 # Approximate gross rental yield by property type, used only as the
 # last-resort fallback when no live rental comparables can be found.
 # These are illustrative UK averages and should be reviewed periodically —
@@ -46,23 +50,25 @@ _FALLBACK_GROSS_YIELD_BY_TYPE = {
     "bungalow": 0.052,
 }
 _DEFAULT_FALLBACK_YIELD = 0.058
-
-
+ 
+_UK_POSTCODE = r"[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}"
+ 
+ 
 @dataclass
 class RentEstimate:
     monthly_rent: int
     method: str            # "live_comparables" | "modelled"
     sample_size: int = 0
     note: str = ""
-
-
+ 
+ 
 @dataclass
 class ComparablesResult:
     sales: list[tuple[str, int]] = field(default_factory=list)   # (address, price)
     method: str = "unavailable"
     note: str = ""
-
-
+ 
+ 
 def _fallback_rent_estimate(price: int, property_type: str) -> RentEstimate:
     yield_rate = _FALLBACK_GROSS_YIELD_BY_TYPE.get(property_type.lower(), _DEFAULT_FALLBACK_YIELD)
     annual_rent = price * yield_rate
@@ -76,13 +82,15 @@ def _fallback_rent_estimate(price: int, property_type: str) -> RentEstimate:
             f"rental valuation."
         ),
     )
-
-
+ 
+ 
 async def _resolve_location_identifier(client: httpx.AsyncClient, outcode: str) -> str | None:
-    """Rightmove's autocomplete endpoint resolves a free-text area (e.g. a
-    postcode outcode) to the internal locationIdentifier its search pages
-    require. This is an unofficial, undocumented endpoint and the first
-    thing likely to need updating if Rightmove changes it."""
+    """Rightmove's autocomplete endpoint (a separate subdomain, not covered
+    by rightmove.co.uk's robots.txt /api/* disallow) resolves a free-text
+    area to the internal locationIdentifier its search pages require. It
+    returns matches like {"id": "573", "type": "OUTCODE", ...} — the
+    identifier search pages actually expect is "<type>^<id>", e.g.
+    "OUTCODE^573", not a field returned directly by this endpoint."""
     try:
         resp = await client.get(
             "https://los.rightmove.co.uk/typeahead",
@@ -93,25 +101,29 @@ async def _resolve_location_identifier(client: httpx.AsyncClient, outcode: str) 
         data = resp.json()
         matches = data.get("matches") or []
         if matches:
-            return matches[0].get("locationIdentifier")
+            m = matches[0]
+            if m.get("id") and m.get("type"):
+                return f"{m['type']}^{m['id']}"
     except Exception:
         return None
     return None
-
-
+ 
+ 
+_RENT_PRICE_PATTERN = re.compile(r"£\s?([\d,]+)\s*pcm", re.I)
+ 
+ 
 async def fetch_rent_estimate(
     price: int,
     property_type: str,
     beds: int | None,
     outcode: str | None,
 ) -> RentEstimate:
-    """Best-effort: search Rightmove's to-rent listings for comparable
-    properties in the same outcode and take the median asking rent. Falls
-    back to a modelled estimate on any failure — this function never
-    raises."""
+    """Best-effort: render Rightmove's to-rent search results for the same
+    outcode/bed count and take the median advertised rent. Falls back to a
+    modelled estimate on any failure — this function never raises."""
     if not outcode or not beds:
         return _fallback_rent_estimate(price, property_type)
-
+ 
     try:
         async with httpx.AsyncClient(
             headers={"User-Agent": settings.extractor_user_agent},
@@ -121,41 +133,54 @@ async def fetch_rent_estimate(
             location_id = await _resolve_location_identifier(client, outcode)
             if not location_id:
                 return _fallback_rent_estimate(price, property_type)
-
+ 
             resp = await client.get(
-                "https://www.rightmove.co.uk/api/_search",
+                "https://www.rightmove.co.uk/property-to-rent/find.html",
                 params={
                     "locationIdentifier": location_id,
-                    "channel": "RENT",
                     "minBedrooms": beds,
                     "maxBedrooms": beds,
-                    "numberOfPropertiesPerPage": 24,
                 },
             )
             resp.raise_for_status()
-            data = resp.json()
-            listings = data.get("properties") or []
-            rents = []
-            for item in listings:
-                amount = (item.get("price") or {}).get("amount")
-                if amount:
-                    rents.append(int(amount))
-
-            if len(rents) >= 3:
-                rents.sort()
-                median = rents[len(rents) // 2]
-                return RentEstimate(
-                    monthly_rent=median,
-                    method="live_comparables",
-                    sample_size=len(rents),
-                    note=f"Median of {len(rents)} comparable {beds}-bed to-let listings in {outcode}.",
-                )
+            text = BeautifulSoup(resp.text, "html.parser").get_text(separator=" ", strip=True)
+ 
+        rents = [
+            int(m.replace(",", ""))
+            for m in _RENT_PRICE_PATTERN.findall(text)
+        ]
+        # Sanity-bound: discard anything that isn't a plausible monthly rent
+        # (guards against stray matches from unrelated page content).
+        rents = [r for r in rents if 100 <= r <= 20_000]
+ 
+        if len(rents) >= 3:
+            rents.sort()
+            median = rents[len(rents) // 2]
+            return RentEstimate(
+                monthly_rent=median,
+                method="live_comparables",
+                sample_size=len(rents),
+                note=f"Median of {len(rents)} comparable {beds}-bed to-let listings in {outcode}.",
+            )
     except Exception:
         pass
-
+ 
     return _fallback_rent_estimate(price, property_type)
-
-
+ 
+ 
+# Sold-price pages render each result as an address ending in a UK
+# postcode, followed shortly after (within the same result card — a sold
+# date and property type typically sit in between) by a "£<price>" figure —
+# e.g. "6, Ansell Drive, Coventry CV6 6PQ ... £250,000". Parsed from the
+# page's flattened visible text (via get_text()) rather than assumed JSON
+# key names, since — unlike the listing page — no embedded data blob could
+# be confirmed for this page type. The bounded gap keeps a match from
+# spanning into the next result's address.
+_ADDRESS_LINE_PATTERN = re.compile(
+    rf"(\d+,\s*[^£]{{3,80}}?{_UK_POSTCODE})[^£]{{0,80}}£\s?([\d,]+)", re.I
+)
+ 
+ 
 async def fetch_comparable_sales(
     address: str,
     outcode: str | None,
@@ -166,7 +191,7 @@ async def fetch_comparable_sales(
     can be found — see module docstring for why."""
     if not outcode:
         return ComparablesResult(sales=[], method="unavailable", note="No postcode area available for comparables lookup.")
-
+ 
     try:
         async with httpx.AsyncClient(
             headers={"User-Agent": settings.extractor_user_agent},
@@ -176,16 +201,14 @@ async def fetch_comparable_sales(
             resp = await client.get(f"https://www.rightmove.co.uk/house-prices/{outcode.lower()}.html")
             resp.raise_for_status()
             html = resp.text
-
-        # Sold-price pages embed a results array similarly to the listing
-        # page's PAGE_MODEL; reuse the same tolerant "find + regex" approach
-        # rather than assuming an exact key name, since this page type is
-        # even less stable than the listing page.
-        matches = re.findall(
-            r'"address":"([^"]{5,80})"[^{}]*?"displayPrice":"£?([\d,]+)"',
-            html,
-        )
-        sales = [(addr, int(price_str.replace(",", ""))) for addr, price_str in matches[:6]]
+ 
+        text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+        matches = _ADDRESS_LINE_PATTERN.findall(text)
+        sales = [
+            (addr.strip(), int(price_str.replace(",", "")))
+            for addr, price_str in matches
+            if 10_000 <= int(price_str.replace(",", "")) <= 20_000_000
+        ][:6]
         if sales:
             return ComparablesResult(
                 sales=sales,
@@ -194,9 +217,10 @@ async def fetch_comparable_sales(
             )
     except Exception:
         pass
-
+ 
     return ComparablesResult(
         sales=[],
         method="unavailable",
         note="Live comparable sales data could not be retrieved for this area.",
     )
+ 
