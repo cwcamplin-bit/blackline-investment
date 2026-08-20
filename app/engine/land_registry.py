@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -59,18 +60,40 @@ from app.config import settings
 
 _SPARQL_ENDPOINT = "http://landregistry.data.gov.uk/landregistry/query"
 
+# Live diagnostics (GET /api/debug/land-registry) confirmed the original
+# version of this query — join from ?addr's postcode, no date bound — times
+# out against the real endpoint for real outcodes (CV6, M20 both hit the
+# timeout, not an error, i.e. the query itself is just too expensive: Price
+# Paid Data has ~28 million transactions nationally since 1995, and
+# STRSTARTS is a string-prefix scan rather than an indexed range lookup on
+# this platform, so an unbounded query has to consider a very large
+# candidate set). Two changes attempt to make this cheaper for the query
+# planner without changing what it returns: (1) a transactionDate lower
+# bound, applied as early as possible (transactions joined and filtered by
+# date BEFORE the postcode join, rather than after), so recency-based
+# selectivity has a chance to reduce the working set before the string
+# comparison; (2) start the join from the transaction pattern rather than
+# the address pattern. This is a genuine attempt at a fix, not a guaranteed
+# one — the underlying scan may simply be too large regardless. If it's
+# still too slow, GET /api/debug/land-registry will show a timeout again in
+# its `diagnostics.error` field, and the pipeline still works correctly
+# either way via the Rightmove-scrape fallback in comparables.py.
+_LOOKBACK_YEARS = 5
+
 # STRSTARTS with a trailing space after the outcode avoids "CV6" also
 # matching "CV61 1AA" or similar longer outcodes that merely share a
 # prefix — full postcodes always have a space before the incode.
 _OUTCODE_COMPARABLES_QUERY = """
 PREFIX lrppi: <http://landregistry.data.gov.uk/def/ppi/>
 PREFIX lrcommon: <http://landregistry.data.gov.uk/def/common/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT ?paon ?saon ?street ?town ?postcode ?amount ?date WHERE {{
+  ?transx lrppi:transactionDate ?date ;
+          lrppi:pricePaid ?amount ;
+          lrppi:propertyAddress ?addr .
+  FILTER(?date >= "{cutoff}"^^xsd:date)
   ?addr lrcommon:postcode ?postcode .
   FILTER(STRSTARTS(STR(?postcode), "{outcode} "))
-  ?transx lrppi:propertyAddress ?addr ;
-          lrppi:pricePaid ?amount ;
-          lrppi:transactionDate ?date .
   OPTIONAL {{ ?addr lrcommon:paon ?paon }}
   OPTIONAL {{ ?addr lrcommon:saon ?saon }}
   OPTIONAL {{ ?addr lrcommon:street ?street }}
@@ -79,6 +102,10 @@ SELECT ?paon ?saon ?street ?town ?postcode ?amount ?date WHERE {{
 ORDER BY DESC(?date)
 LIMIT {limit}
 """
+
+
+def _cutoff_date() -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=365 * _LOOKBACK_YEARS)).strftime("%Y-%m-%d")
 
 _OUTCODE_SHAPE_PATTERN = re.compile(r"[A-Z]{1,2}\d[A-Z\d]?")
 
@@ -125,8 +152,8 @@ async def _run_query(outcode: str, limit: int) -> tuple[dict | None, LandRegistr
     if not safe_outcode:
         return None, LandRegistryDiagnostics(query_url="", error=f"'{outcode}' is not a valid UK outcode shape")
 
-    query = _OUTCODE_COMPARABLES_QUERY.format(outcode=safe_outcode, limit=limit)
-    diag = LandRegistryDiagnostics(query_url=f"{_SPARQL_ENDPOINT}?query=...&output=json (outcode={safe_outcode})")
+    query = _OUTCODE_COMPARABLES_QUERY.format(outcode=safe_outcode, limit=limit, cutoff=_cutoff_date())
+    diag = LandRegistryDiagnostics(query_url=f"{_SPARQL_ENDPOINT}?query=...&output=json (outcode={safe_outcode}, cutoff={_cutoff_date()})")
     try:
         async with httpx.AsyncClient(timeout=settings.land_registry_timeout_seconds) as client:
             resp = await client.get(
