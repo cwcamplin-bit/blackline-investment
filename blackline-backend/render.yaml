@@ -1,0 +1,15 @@
+# Render "Blueprint" config — lets Render auto-detect and deploy this
+# service in one step from New > Blueprint, instead of manually filling in
+# the New Web Service form. Uses the Dockerfile already in this repo.
+services:
+  - type: web
+    name: blackline-backend
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: DEFAULT_LTV_PERCENT
+        value: "75"
+      - key: DEFAULT_MORTGAGE_RATE_PERCENT
+        value: "5.9"
